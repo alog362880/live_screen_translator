@@ -1,0 +1,49 @@
+name: screen_translate_app
+description: >
+  Cross-platform (Windows / Web / iOS) screen-capture OCR translation
+  overlay. Captures screen content, runs on-device OCR, sends recognized
+  text to an AI translation model, and renders translated text back over
+  the original screen coordinates.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+
+  # --- Networking / AI ---
+  http: ^1.2.2                     # calls the Claude/OpenAI translation API
+  web: ^1.1.0                      # dart:js_interop bindings for Flutter Web
+
+  # --- State management ---
+  provider: ^6.1.2
+
+  # --- OCR (iOS + Android; NOT available on Windows/Web — see ocr_service) ---
+  google_mlkit_text_recognition: ^0.14.0
+
+  # --- Windows desktop: tray, hotkeys, window control ---
+  tray_manager: ^0.2.4             # system tray icon + menu
+  hotkey_manager: ^0.2.3           # global "Ctrl+Shift+T" capture hotkey
+  window_manager: ^0.4.3           # borderless / always-on-top / transparent window
+  screen_retriever: ^0.2.0         # display bounds + DPI/scale factor
+  desktop_multi_window: ^0.2.1     # spawns the separate transparent overlay window
+
+  # --- Shared utilities ---
+  path_provider: ^2.1.4
+  shared_preferences: ^2.3.2       # persists the proxy/personal-API-key toggle (AiSettings)
+  image: ^4.2.0                    # decode raw BGRA capture buffer -> PNG for ML Kit
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  ffigen: ^13.0.0                  # regenerate FFI bindings if screen_capture_win.dll changes
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,12 @@
+name: screen_translate_proxy
+description: Thin auth + rate-limit proxy in front of the Anthropic Messages API, so clients never hold the real API key.
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  http: ^1.2.2
+
+dev_dependencies:
+  test: ^1.25.0

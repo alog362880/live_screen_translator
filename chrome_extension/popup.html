@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 300px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; }
+    h1 { font-size: 15px; margin: 0 0 10px; }
+    label { display: block; margin: 8px 0 3px; color: #555; }
+    input, select { width: 100%; box-sizing: border-box; padding: 6px; }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    button { flex: 1; padding: 8px; cursor: pointer; }
+    button.primary { background: #3949ab; color: #fff; border: 0; border-radius: 4px; }
+    small { color: #777; display: block; margin-top: 10px; }
+    .toggle { display: flex; align-items: center; justify-content: space-between;
+      margin-top: 14px; padding-top: 10px; border-top: 1px solid #eee; }
+    .toggle label { margin: 0; color: #222; }
+    .hint { color: #999; font-size: 11px; margin-top: 2px; }
+    #ownKeyFields.hidden, #proxyFields.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Screen Translate</h1>
+  <div id="proxyFields">
+    <label for="url">Proxy URL</label>
+    <input id="url" type="url" placeholder="https://proxy.example.com" />
+    <label for="token">Proxy token</label>
+    <input id="token" type="password" autocomplete="off" />
+  </div>
+  <div class="toggle">
+    <label for="ownKey">Use my own Anthropic API key</label>
+    <input id="ownKey" type="checkbox" />
+  </div>
+  <div id="ownKeyFields" class="hidden">
+    <label for="personalKey">Anthropic API key</label>
+    <input id="personalKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
+    <div class="hint">Sent straight from this browser to api.anthropic.com on every request,
+      and stored locally in this profile only — bypasses the proxy's rate limiting. Get a key
+      at console.anthropic.com; consider giving it a spend limit.</div>
+  </div>
+  <label for="lang">Translate into</label>
+  <select id="lang"></select>
+  <div class="row">
+    <button id="full" class="primary">Translate tab</button>
+    <button id="region">Select region</button>
+  </div>
+  <small>Shortcuts: Ctrl+Shift+T (tab), Ctrl+Shift+Y (region). Esc dismisses the overlay.
+    Change them at chrome://extensions/shortcuts.</small>
+  <script src="popup.js"></script>
+</body>
+</html>

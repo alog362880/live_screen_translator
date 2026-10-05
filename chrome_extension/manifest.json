@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Screen Translate",
+  "version": "0.1.0",
+  "description": "Capture the visible tab, OCR + translate it with an AI model, and overlay the translation on the original text.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Translate this tab" },
+  "commands": {
+    "translate-visible": {
+      "suggested_key": { "default": "Ctrl+Shift+T", "mac": "Command+Shift+T" },
+      "description": "Translate the visible part of the tab"
+    },
+    "translate-region": {
+      "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" },
+      "description": "Drag to select a region and translate it"
+    }
+  }
+}
