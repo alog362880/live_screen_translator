@@ -122,7 +122,7 @@ your actual generated `AppDelegate.swift` if it doesn't compile as-is.
 
 | Package | Why |
 |---|---|
-| `http` | Calls to our proxy (`/proxy`), which forwards to the Claude Messages API |
+| `http` | Calls to our proxy (`/proxy`), which forwards to Claude / Gemini / OpenAI |
 | `web` | Modern typed `dart:js_interop` bindings for `getDisplayMedia` — replaces hand-written `@JS()` externs |
 | `provider` | `TranslationController` (ChangeNotifier) distribution |
 | `google_mlkit_text_recognition` | On-device OCR, iOS/Android only |
@@ -174,7 +174,7 @@ revocable bearer token; the real key lives only on the proxy server.
 | File | Holds | Template |
 |---|---|---|
 | `lib/secrets.dart` | proxy URL + token for the Flutter app | `lib/secrets.example.dart` |
-| `proxy/.env` | the real `ANTHROPIC_API_KEY` + allowed tokens | `proxy/.env.example` |
+| `proxy/.env` | the real provider keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) + allowed tokens | `proxy/.env.example` |
 | `chrome_extension/config.local.js` | default proxy URL + token for the extension | `config.local.example.js` |
 
 On a fresh clone, copy each template and fill it in. `--dart-define=PROXY_URL=... --dart-define=PROXY_TOKEN=...`
@@ -182,12 +182,20 @@ still overrides `lib/secrets.dart` (useful for CI/release). The token ends up em
 (and visible in the JS on Web), so treat it as revocable rather than secret. Flutter Web also needs its
 origin listed in the proxy's `ALLOWED_ORIGINS`.
 
-**Bring your own key:** Settings also has a "Use my own Anthropic API key" toggle
-(`lib/services/ai_settings.dart`, `lib/ui/settings_page.dart`) that switches a user from the
-shared proxy to calling Anthropic directly with a personal key they type in — persisted locally
-via `shared_preferences`, takes effect on the next capture, no rebuild needed. This skips the
-proxy's rate limiting/revocability and, on Web, puts the key in a request header any network
-inspector on that device can read; the in-app copy says so next to the toggle.
+**AI providers:** the app works with Claude, Gemini and ChatGPT. Pick one in Settings
+(`lib/services/ai_config.dart` builds each provider's native request and parses its response;
+`lib/ui/settings_page.dart` is the UI), with an optional per-provider model override
+(defaults: `claude-sonnet-5`, `gemini-2.5-flash`, `gpt-4o-mini`). All three are asked for boxes in
+the same normalized 0-1000 `[ymin, xmin, ymax, xmax]` format, converted to pixels locally. Box
+quality varies by model, so overlay placement is approximate (Gemini is generally the most reliable
+at it).
+
+**Bring your own key:** Settings also has a "Use my own API key" toggle that switches from the
+shared proxy to calling the chosen provider directly with a personal key you type in (one saved
+per provider) — persisted locally via `shared_preferences`, takes effect on the next capture, no
+rebuild. This skips the proxy's rate limiting/revocability and, on Web, puts the key in a request
+header any network inspector on that device can read; the in-app copy says so next to the toggle.
+In proxy mode, the proxy must have a key for the provider you pick.
 
 ## Known gaps / where to extend next
 

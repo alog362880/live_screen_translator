@@ -5,7 +5,9 @@
 self.LOCAL_CONFIG = {
   proxyUrl: 'http://localhost:8080',
   proxyToken: 'paste-a-proxy-token-here',
-  // Optional: prefill "bring your own key" mode too (still off by default —
-  // the popup's checkbox still needs to be turned on to actually use it).
-  personalApiKey: '',
+  // Optional: which provider to default to: 'claude' | 'gemini' | 'openai'.
+  provider: 'claude',
+  // Optional: prefill "bring your own key" mode (still off by default — the
+  // popup's checkbox must be turned on to use it). One key per provider.
+  keys: { claude: '', gemini: '', openai: '' },
 };

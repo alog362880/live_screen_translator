@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'package:http/http.dart' as http;
 
 import '../models/text_block.dart';
+import 'ai_client.dart';
 import 'ai_settings.dart';
 
 /// Sends OCR'd text blocks to an AI model and asks for a structured JSON
@@ -38,47 +38,12 @@ Input:
 ${jsonEncode(payload)}
 ''';
 
-    final config = settings.config;
-    final response = await http.post(
-      config.messagesUri,
-      headers: config.headers,
-      body: jsonEncode({
-        'model': config.model,
-        'max_tokens': 2048,
-        'messages': [
-          {'role': 'user', 'content': prompt}
-        ],
-      }),
-    );
-
-    if (response.statusCode != 200) {
-      throw AiTranslationException(
-        'Translation request failed (${response.statusCode}): ${response.body}',
-      );
-    }
-
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final text = (decoded['content'] as List).first['text'] as String;
-    final translated = _parseJsonArray(text);
+    final answer = await aiComplete(settings.config, prompt: prompt, maxTokens: 2048);
+    final translated = parseJsonArray(answer);
 
     final byId = {for (final t in translated) t['id'] as String: t['translated'] as String};
     return blocks
         .map((b) => b.copyWith(translatedText: byId[b.id] ?? b.originalText))
         .toList();
   }
-
-  List<Map<String, dynamic>> _parseJsonArray(String raw) {
-    // Models occasionally wrap JSON in a ```json fence despite instructions;
-    // strip it defensively rather than failing the whole batch.
-    final cleaned = raw.trim().replaceAll(RegExp(r'^```json|^```|```$'), '').trim();
-    final list = jsonDecode(cleaned) as List;
-    return list.cast<Map<String, dynamic>>();
-  }
-}
-
-class AiTranslationException implements Exception {
-  AiTranslationException(this.message);
-  final String message;
-  @override
-  String toString() => 'AiTranslationException: $message';
 }

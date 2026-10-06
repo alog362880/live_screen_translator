@@ -1,25 +1,26 @@
 import 'dart:convert';
-import 'package:http/http.dart' as http;
 
 import '../models/text_block.dart';
+import 'ai_client.dart';
 import 'ai_settings.dart';
 
 /// Windows and Web have no bundled on-device OCR engine (ML Kit is
 /// mobile-only). Rather than bundling Tesseract, this client does OCR
 /// *and* translation in one multimodal call: send the captured screen
 /// image straight to the AI model and ask for
-/// `[{text, translated, bbox}]` back. One round-trip, no local OCR
-/// dependency, works identically on Windows and Web.
+/// `[{text, translated, box}]` back. One round-trip, no local OCR
+/// dependency, works identically on Windows and Web, with Claude, Gemini
+/// or ChatGPT (see [AiConfig]).
 ///
-/// Trade-off: bounding boxes come back as the model's best estimate
-/// (0-1000 normalized per Claude's vision convention) rather than pixel-
-/// exact ML Kit boxes — good enough for overlay placement, not pixel
-/// perfect. Swap in `google_mlkit_text_recognition` (mobile) or a native
-/// OCR pass if you need exact boxes on desktop/web too.
+/// Boxes are requested as normalized 0-1000 `[ymin, xmin, ymax, xmax]`
+/// (Gemini's native convention, and resolution-independent for the other
+/// providers, which resize images internally) and converted to pixels here.
+/// They're the model's best estimate rather than pixel-exact ML Kit boxes —
+/// good enough for overlay placement. Swap in a native OCR pass if you need
+/// exact boxes on desktop/web.
 ///
-/// Reads [AiSettings.config] fresh on every call, so a user flipping the
-/// proxy/personal-API-key toggle in Settings takes effect on the very next
-/// capture — see ai_settings.dart.
+/// Reads [AiSettings.config] fresh on every call, so changing provider or
+/// key in Settings takes effect on the very next capture.
 class AiVisionOcrClient {
   AiVisionOcrClient({required this.settings});
 
@@ -31,59 +32,49 @@ class AiVisionOcrClient {
     required int pixelWidth,
     required int pixelHeight,
   }) async {
-    final b64 = base64Encode(pngBytes);
     final prompt = '''
-Find every piece of legible on-screen text in this image. For each, return
-its bounding box in pixel coordinates of the ORIGINAL image (width=$pixelWidth,
-height=$pixelHeight) and its translation into $targetLanguage.
+Find every piece of legible on-screen text in this image. For each, return the
+original text, its translation into $targetLanguage, and its bounding box as
+"box_2d": [ymin, xmin, ymax, xmax] with each value normalized to the range
+0-1000 relative to the image (0,0 is top-left; 1000,1000 is bottom-right).
+Skip text already in $targetLanguage.
 
 Return ONLY a JSON array, no commentary, each item shaped exactly as:
-{"text": "...", "translated": "...", "bbox": [left, top, width, height]}
+{"text": "...", "translated": "...", "box_2d": [ymin, xmin, ymax, xmax]}
 ''';
 
-    final config = settings.config;
-    final response = await http.post(
-      config.messagesUri,
-      headers: config.headers,
-      body: jsonEncode({
-        'model': config.model,
-        'max_tokens': 4096,
-        'messages': [
-          {
-            'role': 'user',
-            'content': [
-              {
-                'type': 'image',
-                'source': {'type': 'base64', 'media_type': 'image/png', 'data': b64},
-              },
-              {'type': 'text', 'text': prompt},
-            ],
-          }
-        ],
-      }),
+    final answer = await aiComplete(
+      settings.config,
+      prompt: prompt,
+      imageBase64: base64Encode(pngBytes),
+      maxTokens: 4096,
     );
+    return parseBlocks(answer, pixelWidth: pixelWidth, pixelHeight: pixelHeight);
+  }
 
-    if (response.statusCode != 200) {
-      throw Exception('Vision OCR/translate failed (${response.statusCode}): ${response.body}');
-    }
-
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final text = (decoded['content'] as List).first['text'] as String;
-    final cleaned = text.trim().replaceAll(RegExp(r'^```json|^```|```$'), '').trim();
-    final items = (jsonDecode(cleaned) as List).cast<Map<String, dynamic>>();
-
+  /// Converts the model's JSON answer into pixel-space [TextBlock]s.
+  static List<TextBlock> parseBlocks(
+    String answer, {
+    required int pixelWidth,
+    required int pixelHeight,
+  }) {
     var i = 0;
-    return items.map((item) {
-      final bbox = (item['bbox'] as List).cast<num>();
-      return TextBlock(
+    final blocks = <TextBlock>[];
+    for (final item in parseJsonArray(answer)) {
+      final box = (item['box_2d'] as List?)?.cast<num>();
+      if (box == null || box.length != 4) continue;
+      final ymin = box[0].toDouble(), xmin = box[1].toDouble();
+      final ymax = box[2].toDouble(), xmax = box[3].toDouble();
+      blocks.add(TextBlock(
         id: 'blk_${i++}',
-        originalText: item['text'] as String,
-        translatedText: item['translated'] as String,
-        left: bbox[0].toDouble(),
-        top: bbox[1].toDouble(),
-        width: bbox[2].toDouble(),
-        height: bbox[3].toDouble(),
-      );
-    }).toList();
+        originalText: '${item['text'] ?? ''}',
+        translatedText: '${item['translated'] ?? item['text'] ?? ''}',
+        left: xmin / 1000 * pixelWidth,
+        top: ymin / 1000 * pixelHeight,
+        width: (xmax - xmin) / 1000 * pixelWidth,
+        height: (ymax - ymin) / 1000 * pixelHeight,
+      ));
+    }
+    return blocks;
   }
 }

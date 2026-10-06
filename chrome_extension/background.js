@@ -1,17 +1,19 @@
 // Service worker: orchestrates capture -> (crop) -> AI OCR+translate -> render.
 // Mirrors lib/services/ai_vision_ocr_client.dart from the Flutter app.
 
+importScripts('providers.js'); // self.PROVIDERS: claude / gemini / openai
 // Optional git-ignored defaults (copy config.local.example.js). Missing file is fine.
 try { importScripts('config.local.js'); } catch (_) {}
 const LOCAL = self.LOCAL_CONFIG || {};
 
 const DEFAULTS = {
-  proxyUrl: LOCAL.proxyUrl || '', // our proxy (see /proxy); it holds the real Anthropic key
+  provider: LOCAL.provider || 'claude',
+  proxyUrl: LOCAL.proxyUrl || '', // our proxy (see /proxy); it holds the real provider keys
   proxyToken: LOCAL.proxyToken || '',
   useOwnKey: false, // opt-in "bring your own key" mode — see popup.html's toggle
-  personalApiKey: LOCAL.personalApiKey || '',
+  keys: { ...(LOCAL.personalApiKey ? { claude: LOCAL.personalApiKey } : {}), ...(LOCAL.keys || {}) },
+  models: LOCAL.models || {}, // optional per-provider model override
   targetLanguage: 'English',
-  model: 'claude-sonnet-5',
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -20,29 +22,33 @@ async function getSettings() {
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
   // Empty/false stored values mean "unset", so they don't mask the local defaults.
   for (const k of Object.keys(stored)) if (stored[k] === '' || stored[k] === false) delete stored[k];
-  return { ...DEFAULTS, ...stored };
+  const merged = { ...DEFAULTS, ...stored };
+  // Per-provider maps merge key by key so one saved key doesn't hide the others.
+  merged.keys = { ...DEFAULTS.keys, ...(stored.keys || {}) };
+  merged.models = { ...DEFAULTS.models, ...(stored.models || {}) };
+  for (const m of [merged.keys, merged.models]) for (const k of Object.keys(m)) if (!m[k]) delete m[k];
+  if (!self.PROVIDERS[merged.provider]) merged.provider = 'claude';
+  return merged;
 }
 
-/// Mirrors lib/services/ai_config.dart's two AiConfig modes: the shared
-/// proxy (default) or the user's own Anthropic key, called directly.
-function endpointFor(settings) {
+/// Mirrors lib/services/ai_config.dart: the shared proxy (default) or the
+/// user's own key for the chosen provider, called directly.
+function requestFor(settings, b64) {
+  const p = self.PROVIDERS[settings.provider];
+  const model = (settings.models[settings.provider] || '').trim() || p.defaultModel;
   if (settings.useOwnKey) {
     return {
-      url: 'https://api.anthropic.com/v1/messages',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': settings.personalApiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
+      p,
+      url: p.directUrl(model),
+      headers: p.directHeaders(settings.keys[settings.provider]),
+      model,
     };
   }
   return {
-    url: `${settings.proxyUrl.replace(/\/+$/, '')}/v1/messages`,
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${settings.proxyToken}`,
-    },
+    p,
+    url: settings.proxyUrl.replace(/\/+$/, '') + p.proxyPath(model),
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${settings.proxyToken}` },
+    model,
   };
 }
 
@@ -77,53 +83,68 @@ async function blobToBase64(blob) {
   return btoa(bin);
 }
 
-async function extractAndTranslate({ base64, width, height, settings }) {
-  const prompt =
-    `Find every piece of legible on-screen text in this image. For each, return its ` +
-    `bounding box in pixel coordinates of the ORIGINAL image (width=${width}, ` +
-    `height=${height}) and its translation into ${settings.targetLanguage}.\n\n` +
-    `Return ONLY a JSON array, no commentary, each item shaped exactly as:\n` +
-    `{"text": "...", "translated": "...", "bbox": [left, top, width, height]}\n` +
-    `Skip text already in ${settings.targetLanguage}.`;
+// Boxes are requested as normalized 0-1000 [ymin, xmin, ymax, xmax] (Gemini's
+// native format; resolution-independent for the others) and converted to the
+// pixel [left, top, width, height] that content.js expects.
+function parseBlocks(raw, width, height) {
+  let text = raw.trim().replace(/^```(?:json)?|```$/g, '').trim();
+  const start = text.indexOf('['), end = text.lastIndexOf(']');
+  if (start >= 0 && end > start) text = text.slice(start, end + 1);
+  return JSON.parse(text)
+    .filter((it) => Array.isArray(it.box_2d) && it.box_2d.length === 4)
+    .map((it) => {
+      const [ymin, xmin, ymax, xmax] = it.box_2d;
+      return {
+        text: it.text ?? '',
+        translated: it.translated ?? it.text ?? '',
+        bbox: [
+          (xmin / 1000) * width,
+          (ymin / 1000) * height,
+          ((xmax - xmin) / 1000) * width,
+          ((ymax - ymin) / 1000) * height,
+        ],
+      };
+    });
+}
 
-  const { url, headers } = endpointFor(settings);
+async function extractAndTranslate({ base64, width, height, settings }) {
+  const lang = settings.targetLanguage;
+  const prompt =
+    `Find every piece of legible on-screen text in this image. For each, return the original ` +
+    `text, its translation into ${lang}, and its bounding box as "box_2d": [ymin, xmin, ymax, ` +
+    `xmax] with each value normalized to the range 0-1000 relative to the image (0,0 is ` +
+    `top-left; 1000,1000 is bottom-right). Skip text already in ${lang}.
+
+` +
+    `Return ONLY a JSON array, no commentary, each item shaped exactly as:
+` +
+    `{"text": "...", "translated": "...", "box_2d": [ymin, xmin, ymax, xmax]}`;
+
+  const { p, url, headers, model } = requestFor(settings, base64);
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model: settings.model,
-      max_tokens: 4096,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
-            { type: 'text', text: prompt },
-          ],
-        },
-      ],
-    }),
+    body: JSON.stringify(p.body(model, prompt, base64)),
   });
-  const via = settings.useOwnKey ? 'Anthropic' : 'Proxy';
-  if (res.status === 401) throw new Error(`${via} rejected the ${settings.useOwnKey ? 'API key' : 'token'} (401).`);
-  if (res.status === 429) throw new Error(`Rate limited by ${via.toLowerCase()}; retry shortly.`);
+  const via = settings.useOwnKey ? p.label : 'Proxy';
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(`${via} rejected the ${settings.useOwnKey ? 'API key' : 'token'} (${res.status}).`);
+  }
+  if (res.status === 429) throw new Error(`Rate limited by ${via}; retry shortly.`);
   if (!res.ok) throw new Error(`${via} ${res.status}: ${(await res.text()).slice(0, 300)}`);
 
-  const data = await res.json();
-  const raw = data.content?.[0]?.text ?? '[]';
-  // Models sometimes wrap JSON in a code fence despite instructions.
-  const cleaned = raw.trim().replace(/^```json|^```|```$/g, '').trim();
-  return JSON.parse(cleaned);
+  return parseBlocks(p.extract(await res.json()), width, height);
 }
 
 async function run(tab, mode) {
   const tabId = tab.id;
   try {
     const settings = await getSettings();
-    if (settings.useOwnKey ? !settings.personalApiKey : !settings.proxyUrl || !settings.proxyToken) {
+    const own = settings.useOwnKey;
+    if (own ? !settings.keys[settings.provider] : !settings.proxyUrl || !settings.proxyToken) {
       throw new Error(
-        settings.useOwnKey
-          ? 'Set your Anthropic API key in the extension popup first.'
+        own
+          ? `Set your ${self.PROVIDERS[settings.provider].label} API key in the extension popup first.`
           : 'Set the proxy URL and token in the extension popup first.',
       );
     }

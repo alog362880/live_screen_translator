@@ -27,11 +27,16 @@ Map<String, String> _loadDotEnv(String path) {
 Future<void> main() async {
   // Real environment variables win over .env (so prod/Docker config is unaffected).
   final env = {..._loadDotEnv('.env'), ...Platform.environment};
-  final key = env['ANTHROPIC_API_KEY'] ?? '';
   final tokens = _csv(env['PROXY_TOKENS']);
+  String? keyOf(String name) => (env[name] ?? '').isEmpty ? null : env[name];
 
-  if (key.isEmpty || tokens.isEmpty) {
-    stderr.writeln('ANTHROPIC_API_KEY and PROXY_TOKENS (comma-separated) are required (set them in proxy/.env or the environment).');
+  final anthropicKey = keyOf('ANTHROPIC_API_KEY');
+  final geminiKey = keyOf('GEMINI_API_KEY');
+  final openaiKey = keyOf('OPENAI_API_KEY');
+
+  if ((anthropicKey == null && geminiKey == null && openaiKey == null) || tokens.isEmpty) {
+    stderr.writeln('PROXY_TOKENS and at least one of ANTHROPIC_API_KEY / GEMINI_API_KEY / '
+        'OPENAI_API_KEY are required (set them in proxy/.env or the environment).');
     exit(64);
   }
   if (tokens.any((t) => t.length < 24)) {
@@ -39,19 +44,29 @@ Future<void> main() async {
     exit(64);
   }
 
+  Set<String> models(String envName, String provider) =>
+      env[envName] != null ? _csv(env[envName]) : defaultAllowedModels[provider]!;
+
   final cfg = ProxyConfig(
-    anthropicApiKey: key,
+    anthropicApiKey: anthropicKey,
+    geminiApiKey: geminiKey,
+    openaiApiKey: openaiKey,
     tokens: tokens,
-    upstream: env['ANTHROPIC_BASE_URL'] ?? 'https://api.anthropic.com',
-    allowedModels: env['ALLOWED_MODELS'] != null
-        ? _csv(env['ALLOWED_MODELS'])
-        : const {'claude-sonnet-5', 'claude-haiku-4-5-20251001'},
+    anthropicUpstream: env['ANTHROPIC_BASE_URL'] ?? 'https://api.anthropic.com',
+    geminiUpstream: env['GEMINI_BASE_URL'] ?? 'https://generativelanguage.googleapis.com',
+    openaiUpstream: env['OPENAI_BASE_URL'] ?? 'https://api.openai.com',
+    allowedModels: {
+      providerClaude: models('ALLOWED_MODELS_CLAUDE', providerClaude),
+      providerGemini: models('ALLOWED_MODELS_GEMINI', providerGemini),
+      providerOpenai: models('ALLOWED_MODELS_OPENAI', providerOpenai),
+    },
     rateLimitPerMinute: int.tryParse(env['RATE_LIMIT_PER_MIN'] ?? '') ?? 20,
     allowedOrigins: _csv(env['ALLOWED_ORIGINS']),
   );
 
   final port = int.tryParse(env['PORT'] ?? '') ?? 8080;
   await startProxy(cfg, port: port);
-  stdout.writeln('Proxy listening on :$port (${tokens.length} token(s), '
+  stdout.writeln('Proxy listening on :$port, providers: ${cfg.enabledProviders.join(', ')} '
+      '(${tokens.length} token(s), '
       '${cfg.rateLimitPerMinute} req/min each)');
 }
