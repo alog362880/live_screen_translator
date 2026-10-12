@@ -1,228 +1,156 @@
 # Screen Translate
 
-Cross-platform (Windows desktop / Flutter Web / iOS) screen-capture →
-OCR → AI-translation → on-screen overlay app.
+Capture your screen (or a region), read the text on it with AI vision, translate it into a language you
+choose, and draw the translation directly over the original text.
 
-Verified in this environment: `flutter pub get` resolves, `flutter
-analyze` is clean, `flutter test` passes, and `flutter build web`
-compiles successfully (including a Wasm dry run). `flutter build windows`
-could not be verified here because the local Visual Studio install is
-missing the "Desktop development with C++" workload (`flutter doctor`
-flags this) — the CMake/C++ wiring is in place and should build once that
-workload is installed. iOS cannot be built or verified from a Windows
-host at all; it needs Xcode on macOS.
+| Part | What it is | Docs |
+|---|---|---|
+| **Flutter app** | Windows desktop, Web and iOS | this file |
+| **Chrome extension** | Translate the visible tab (Manifest V3) | [chrome_extension/README.md](chrome_extension/README.md) |
+| **Proxy server** | Keeps your real API keys off client devices | [proxy/README.md](proxy/README.md) |
 
-## Architecture
+Works with **Claude, Gemini and ChatGPT**. Use a shared proxy, or bring your own API key.
 
-```
-lib/
-  models/
-    text_block.dart        // {id, originalText, bbox, translatedText}
-    capture_frame.dart      // captured image + pixel/logical size + origin
-  services/
-    screen_translation_service.dart   // the platform-agnostic interface
-    service_factory.dart              // conditional-import platform picker
-    service_stub.dart / service_io.dart / service_web.dart
-    service_windows.dart              // Windows implementation
-    service_ios.dart                  // iOS implementation
-    ai_translation_client.dart        // text-only translate (used by iOS, after ML Kit OCR)
-    ai_vision_ocr_client.dart         // combined OCR+translate via AI vision (Windows/Web)
-    ocr_service_mlkit.dart            // Google ML Kit wrapper (iOS/Android only)
-  state/
-    translation_controller.dart       // ChangeNotifier driving the pipeline
-  ui/
-    floating_trigger_button.dart
-    translation_overlay_stack.dart
-    home_page.dart / settings_page.dart
-  main.dart                            // also the desktop_multi_window overlay entrypoint
+## Quick start
 
-windows/runner/
-  screen_capture_channel.{h,cpp}       // GDI BitBlt + WIC PNG encode, MethodChannel
-  NOTES.md                             // wiring notes (already applied to this template)
-
-web/
-  screen_capture_interop.js            // reference-only; service_web.dart uses package:web instead
-
-ios/
-  BroadcastExtension/SampleHandler.swift   // ReplayKit live-capture extension
-  ShareExtension/ShareViewController.swift // one-off screenshot → app handoff
-  LiveActivity/*.swift                     // Dynamic Island / Lock Screen widget
-  Runner/AppDelegate.swift                 // registers ScreenTranslateChannels + deep-link handoff
-  Runner/ScreenTranslateChannels.swift     // all 3 app-level method channels (see below)
-  NOTES_XCODE_SETUP.md                     // step-by-step: App Groups + 3 extension targets
-```
-
-`ScreenTranslationService` is the one interface the UI/state layer talks
-to (`initialize`, `captureOnce`, `recognizeText`, `showOverlay`,
-`hideOverlay`, `updateTargetLanguage`, `dispose`). `service_factory.dart`
-picks the concrete implementation at **compile time** via Dart's
-conditional-import mechanism (`dart.library.js_interop` for Web,
-`dart.library.io` for native, with a runtime `Platform.isWindows` /
-`Platform.isIOS` check inside `service_io.dart` since both desktop and
-iOS compile under `dart:io`).
-
-### iOS method channels (ReplayKit ↔ Live Activity)
-
-Three channels, all registered by `ios/Runner/ScreenTranslateChannels.swift`
-from `AppDelegate.swift`, cover the whole loop:
-
-1. **`screen_translate/broadcast_picker`** (`showPicker`) — called from
-   `IosScreenTranslationService.prepareCaptureSession()`, wired to the
-   "Start live capture" button on the home page. Native side momentarily
-   adds an off-screen `RPSystemBroadcastPickerView` and forwards a
-   synthetic tap to it, since that view has no supported
-   present-programmatically API — this is what makes the system broadcast
-   picker reachable from Flutter without a custom `PlatformView`.
-2. Once the user picks the extension from that system popover, iOS runs
-   `ios/BroadcastExtension/SampleHandler.swift` as its own process; it
-   writes the latest frame (throttled to 1 fps) into the shared App Group
-   container. `IosScreenTranslationService.captureOnce()` reads it
-   straight off disk — no channel needed there, just a shared file.
-3. **`screen_translate/live_activity`** (`getAppGroupContainerPath`,
-   `startOrUpdateLiveActivity`, `endLiveActivity`) — resolves that App
-   Group path, and starts/updates/ends the ActivityKit Live Activity
-   (Dynamic Island / Lock Screen) once a capture has been OCR'd and
-   translated. Requires iOS 16.2+ (see
-   [ios/NOTES_XCODE_SETUP.md](ios/NOTES_XCODE_SETUP.md) step 6 for why
-   16.1 isn't enough).
-4. **`screen_translate/deeplink`** (`onShareExtensionCapture`) — the
-   separate one-off path: `ios/ShareExtension/ShareViewController.swift`
-   writes a screenshot to the same App Group container and opens
-   `screentranslate://capture`; `AppDelegate.swift`'s
-   `application(_:open:options:)` forwards that through this channel.
-   `TranslationController.initialize()` wires
-   `ScreenTranslationService.onExternalCaptureRequest` to
-   `runCaptureAndTranslate` once, generically, so neither `main.dart` nor
-   the UI layer needs an iOS-specific type check to hook this up.
-
-Not build-verified against a real SDK — this machine has no macOS/Xcode
-to compile against, and there's no way around that for iOS specifically.
-Written against `FlutterPluginRegistry`/`FlutterPluginRegistrar` and
-ActivityKit's `ActivityContent`-based API, both stable, documented
-surfaces; see the comment in `NOTES_XCODE_SETUP.md` step 5 for the one
-spot (`engineBridge.pluginRegistry`, from Flutter's newer
-"implicit engine" `AppDelegate` pattern) worth double-checking against
-your actual generated `AppDelegate.swift` if it doesn't compile as-is.
-
-### Why OCR differs by platform
-
-- **iOS**: `google_mlkit_text_recognition` runs on-device, giving
-  pixel-accurate bounding boxes. Text is then sent (text-only, no image)
-  to `AiTranslationClient` for translation.
-- **Windows / Web**: ML Kit has no binding for either target. Rather than
-  bundling Tesseract, `AiVisionOcrClient` sends the captured PNG straight
-  to the AI model in one multimodal call and asks for
-  `[{text, translated, bbox}]` back — one round trip, no extra native
-  dependency, at the cost of boxes being the model's estimate rather than
-  pixel-exact. Swap in a native OCR pass (Windows.Media.Ocr via WinRT, or
-  Tesseract.js on Web) if you need exact boxes later; the
-  `ScreenTranslationService` interface doesn't change either way.
-
-## pubspec.yaml — package choices
-
-| Package | Why |
-|---|---|
-| `http` | Calls to our proxy (`/proxy`), which forwards to Claude / Gemini / OpenAI |
-| `web` | Modern typed `dart:js_interop` bindings for `getDisplayMedia` — replaces hand-written `@JS()` externs |
-| `provider` | `TranslationController` (ChangeNotifier) distribution |
-| `google_mlkit_text_recognition` | On-device OCR, iOS/Android only |
-| `tray_manager` | Windows system tray icon + menu |
-| `hotkey_manager` | Windows global hotkey (default `Ctrl+Shift+T`) |
-| `window_manager` | Frameless/transparent/always-on-top window control |
-| `screen_retriever` | Display bounds + logical size for coordinate mapping |
-| `desktop_multi_window` | Spawns the separate transparent overlay window on Windows |
-| `path_provider` | Temp file for ML Kit's file-based `InputImage` API |
-| `image` | Available for raw-buffer decode if you swap the native capture format |
-| `uuid` | Available for block IDs if you move off simple counters |
-
-## Native permissions / capabilities per platform
-
-- **Windows**: none at the OS-permission level — GDI screen capture and
-  global hotkeys don't require a manifest entry. `SYSTEM_ALERT_WINDOW` is
-  an **Android** concept (this app targets Windows/Web/iOS, not Android,
-  per this iteration's scope) and doesn't apply here.
-- **Web**: `getDisplayMedia` triggers the browser's native
-  tab/window/screen picker at call time — no manifest permission, but it
-  **must** be called from a user-gesture handler (already the case: the
-  floating trigger's `onTap`).
-- **iOS**: App Groups capability (`group.com.example.screentranslate`) on
-  all four targets (Runner, BroadcastExtension, ShareExtension,
-  ScreenTranslateWidget), `NSSupportsLiveActivities` in `Info.plist`, and
-  the `screentranslate://` URL scheme for the Share Extension handoff.
-  Full steps: [ios/NOTES_XCODE_SETUP.md](ios/NOTES_XCODE_SETUP.md).
-
-## Running it
+You need the Flutter SDK, plus the platform tooling for whichever target you run.
 
 ```bash
 flutter pub get
 
-# Windows (needs Visual Studio "Desktop development with C++" workload)
-flutter run -d windows --dart-define=PROXY_URL=https://proxy.example.com --dart-define=PROXY_TOKEN=...
+# 1. Local secrets (git-ignored; copy each template and fill it in)
+cp lib/secrets.example.dart lib/secrets.dart       # proxy URL + token for the app
+cp proxy/.env.example proxy/.env                   # real provider key(s) + tokens (proxy only)
 
-# Web
-flutter run -d chrome --dart-define=PROXY_URL=https://proxy.example.com --dart-define=PROXY_TOKEN=...
+# 2. Start the proxy (needs at least one provider key in proxy/.env)
+cd proxy && dart pub get && dart run bin/server.dart     # listens on :8080
 
-# iOS (from macOS only, after completing ios/NOTES_XCODE_SETUP.md)
-flutter run -d <device-or-simulator> --dart-define=PROXY_URL=... --dart-define=PROXY_TOKEN=...
+# 3. Run the app
+flutter run -d chrome                  # Web
+flutter run -d windows                 # Windows (see requirements below)
 ```
 
-The app never holds an Anthropic key. It calls the proxy in [proxy/](proxy/README.md) with a
-revocable bearer token; the real key lives only on the proxy server.
+`--dart-define=PROXY_URL=... --dart-define=PROXY_TOKEN=...` overrides `lib/secrets.dart`, which is useful
+for CI and release builds.
 
-**Local secrets (all git-ignored, each with a committed `.example` template):**
+**Don't want to run a proxy?** Open Settings in the app, turn on **Use my own API key**, pick a provider and
+paste your key. It takes effect on the next capture, with no rebuild.
+
+### Platform requirements
+
+- **Windows:** Visual Studio with the **Desktop development with C++** workload.
+- **Web:** nothing extra.
+- **iOS:** macOS with Xcode, plus the extension targets described in [ios/NOTES_XCODE_SETUP.md](ios/NOTES_XCODE_SETUP.md).
+
+## AI providers
+
+Pick a provider in **Settings** (or the extension popup). Each can be reached through the proxy or directly
+with your own key, and each keeps its own saved key and optional model override.
+
+| Provider | Default model | Key from |
+|---|---|---|
+| Claude (Anthropic) | `claude-sonnet-5` | console.anthropic.com |
+| Gemini (Google) | `gemini-2.5-flash` | aistudio.google.com |
+| ChatGPT (OpenAI) | `gpt-4o-mini` | platform.openai.com |
+
+- `lib/services/ai_config.dart` builds each provider's native request and parses its response.
+- All three are asked for text boxes in one format: normalized 0–1000 `[ymin, xmin, ymax, xmax]`, converted to
+  pixels locally. How accurately translations line up with the original text depends on the model, so
+  placement is approximate.
+- Model names change over time. Override them in Settings, or in the proxy's `ALLOWED_MODELS_*` variables.
+
+### Proxy mode (default) vs your own key
+
+| | Proxy | Own key |
+|---|---|---|
+| Real API key lives | on your proxy server only | on the user's device |
+| Client carries | a revocable, rate-limited token | the real key |
+| Setup | run `proxy/` and set `PROXY_URL` / `PROXY_TOKEN` | paste a key in Settings |
+
+The proxy token is still embedded in a built app (and visible in the JavaScript on Web), so treat it as
+revocable rather than secret. With your own key on Web or in the extension, the key is visible to anyone
+inspecting that browser's network traffic. Give such keys a spend limit.
+
+## Local secrets
+
+All git-ignored, each with a committed `.example` template:
 
 | File | Holds | Template |
 |---|---|---|
 | `lib/secrets.dart` | proxy URL + token for the Flutter app | `lib/secrets.example.dart` |
-| `proxy/.env` | the real provider keys (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) + allowed tokens | `proxy/.env.example` |
-| `chrome_extension/config.local.js` | default proxy URL + token for the extension | `config.local.example.js` |
+| `proxy/.env` | `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `PROXY_TOKENS` | `proxy/.env.example` |
+| `chrome_extension/config.local.js` | default proxy URL, token and provider for the extension | `config.local.example.js` |
 
-On a fresh clone, copy each template and fill it in. `--dart-define=PROXY_URL=... --dart-define=PROXY_TOKEN=...`
-still overrides `lib/secrets.dart` (useful for CI/release). The token ends up embedded in the built app
-(and visible in the JS on Web), so treat it as revocable rather than secret. Flutter Web also needs its
-origin listed in the proxy's `ALLOWED_ORIGINS`.
+## How it works
 
-**AI providers:** the app works with Claude, Gemini and ChatGPT. Pick one in Settings
-(`lib/services/ai_config.dart` builds each provider's native request and parses its response;
-`lib/ui/settings_page.dart` is the UI), with an optional per-provider model override
-(defaults: `claude-sonnet-5`, `gemini-2.5-flash`, `gpt-4o-mini`). All three are asked for boxes in
-the same normalized 0-1000 `[ymin, xmin, ymax, xmax]` format, converted to pixels locally. Box
-quality varies by model, so overlay placement is approximate (Gemini is generally the most reliable
-at it).
+```
+capture ──► AI vision (OCR + translate in one call) ──► boxes → pixels ──► overlay
+```
 
-**Bring your own key:** Settings also has a "Use my own API key" toggle that switches from the
-shared proxy to calling the chosen provider directly with a personal key you type in (one saved
-per provider) — persisted locally via `shared_preferences`, takes effect on the next capture, no
-rebuild. This skips the proxy's rate limiting/revocability and, on Web, puts the key in a request
-header any network inspector on that device can read; the in-app copy says so next to the toggle.
-In proxy mode, the proxy must have a key for the provider you pick.
+| Platform | Capture | Overlay |
+|---|---|---|
+| Windows | Win32 GDI full screen, or a Snipping Tool-style drag-to-select region (C++ method channel); tray icon and `Ctrl+Shift+T` global hotkey | transparent always-on-top second window |
+| Web | `getDisplayMedia` via `package:web` | chips drawn over the captured frame in the page |
+| iOS | ReplayKit Broadcast Upload Extension (frames shared via an App Group), or a Share Extension for one-off screenshots | in-app overlay + Live Activity (Dynamic Island / Lock Screen) |
 
-## Known gaps / where to extend next
+On iOS, text is recognized on-device with Google ML Kit first, and only the text (not the image) is sent for
+translation. On Windows and Web there is no bundled OCR engine, so the screenshot goes straight to the AI
+model, which does both jobs in one request.
 
-- `WindowsScreenTranslationService.captureRegion()` calls
-  `_captureChannel.invokeMethod('captureRegion')`, backed by
-  `ScreenCaptureChannel::CaptureRegion()` in
-  `windows/runner/screen_capture_channel.cpp` — a full drag-to-select
-  picker (`RegionSelector`): a per-pixel-alpha layered window dims the
-  whole virtual screen and punches a live "hole" over the drag rect
-  (Snipping Tool-style), Esc cancels, multi-monitor bounds are clamped.
-  Not build-tested end-to-end on this machine (Visual Studio's C++
-  workload is incomplete here — see the top of this file); it compiles
-  against the same reviewed patterns as `captureFullScreen()`. Known
-  limitation: `GetDpiForSystem()` only reflects the primary monitor's
-  scale factor, so a region dragged on a secondary monitor with a
-  different DPI will have slightly-off `logicalWidth`/`logicalHeight` —
-  see the comment in `CaptureRegion()` for the per-monitor fix. Perf notes
-  for very large multi-monitor setups are in
+### Code structure
+
+```
+lib/
+  models/       TextBlock, CaptureFrame
+  services/
+    screen_translation_service.dart   platform-agnostic interface the UI talks to
+    service_factory.dart              picks the implementation at compile time (conditional imports)
+    service_windows.dart / service_web.dart / service_ios.dart
+    ai_config.dart                    providers: endpoints, headers, request bodies, response parsing
+    ai_settings.dart                  runtime provider / mode / keys, persisted with shared_preferences
+    ai_client.dart                    one request/response round trip + JSON cleanup
+    ai_vision_ocr_client.dart         OCR + translate from an image (Windows / Web)
+    ai_translation_client.dart        translate already-recognized text (iOS)
+    ocr_service_mlkit.dart            Google ML Kit wrapper (iOS)
+  state/        TranslationController (drives the pipeline)
+  ui/           home page, settings, floating trigger button, overlay stack
+windows/runner/ screen_capture_channel.{h,cpp}   GDI + WIC capture and the region picker
+ios/            Broadcast / Share / Live Activity extensions, Runner/ScreenTranslateChannels.swift
+proxy/          Dart proxy server (bin/, lib/, tests)
+chrome_extension/
+```
+
+iOS method channels: `screen_translate/broadcast_picker` (shows the system broadcast picker),
+`screen_translate/live_activity` (App Group path and Live Activity updates) and `screen_translate/deeplink`
+(Share Extension handoff). Details are in [ios/NOTES_XCODE_SETUP.md](ios/NOTES_XCODE_SETUP.md) and
+[windows/runner/NOTES.md](windows/runner/NOTES.md).
+
+## Tests
+
+```bash
+flutter analyze && flutter test     # provider request/response + box-conversion tests, widget smoke test
+cd proxy && dart test               # auth, rate limit, model allowlist, field stripping, routing, CORS
+```
+
+## Status
+
+| Part | State |
+|---|---|
+| Dart code | `flutter analyze` clean, all tests pass |
+| Web | `flutter build web` compiles |
+| Proxy | tested against a fake upstream and a real server start; never run against the live provider APIs |
+| Chrome extension | logic tested in headless Chrome with stubbed APIs; not yet loaded in a real Chrome |
+| Windows | C++ capture and region picker wired in and the picker's Win32 code compiles standalone, but `flutter build windows` hasn't been run (the Visual Studio C++ workload was missing on the dev machine) |
+| iOS | written but never built (needs macOS/Xcode) |
+| Live AI calls | none made yet, so prompts, model names and overlay alignment are untested against real responses |
+
+## Known limitations
+
+- **Region picker DPI:** `GetDpiForSystem()` only reflects the primary monitor's scale, so a region dragged on a
+  secondary monitor with a different DPI has slightly off logical sizes. Multi-monitor performance notes are in
   [windows/runner/NOTES.md](windows/runner/NOTES.md).
-- The floating trigger button itself, on Windows, is described in the
-  spec as living in its own always-on-top window; this starter wires the
-  *overlay* (translated text) into a `desktop_multi_window` window but
-  reuses the main app window for the trigger button for simplicity — spawn
-  a second tiny always-on-top window the same way if you want the trigger
-  itself to float over other apps too.
-- Web has no OS-level "floating over other apps" concept at all (browser
-  sandboxing) — captured frame + translated chips render inside the app's
-  own page, per the spec's Web section.
-- `AiTranslationClient` / `AiVisionOcrClient` take an `AiConfig` (proxy URL, token, model,
-  default `claude-sonnet-5`). To use another provider, change the proxy's upstream, not the clients.
+- **Windows trigger button:** the translated overlay is its own always-on-top window, but the trigger button
+  lives in the main app window. A second small floating window would be needed for a trigger that floats over
+  other apps.
+- **Web:** browsers can't draw over other apps, so the result appears inside the page, over the captured frame.
+- **Proxy rate limiting:** in memory and per process, so it resets on restart and isn't shared across replicas.
